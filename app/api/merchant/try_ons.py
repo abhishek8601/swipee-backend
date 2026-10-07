@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
@@ -15,6 +16,10 @@ class CreateTryOnSchema(BaseModel):
     ai_model_id: int
     colour_attribute_value_id: Optional[int] = None
     source_image_id: Optional[int] = None
+
+class ReelGenerationSchema(CreateTryOnSchema):
+    scene_style: Optional[str] = "studio"
+    duration_seconds: int = 20
 
 def format_try_on(to: ProductTryOn) -> dict:
     return {
@@ -127,6 +132,83 @@ def create_try_on(
     background_tasks.add_task(run_try_on_background, try_on.id)
 
     return {"data": format_try_on(try_on)}
+
+
+@router.get("/reels")
+def list_reels(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List AI creative assets available for preview/publishing as reels."""
+    rows = db.query(ProductTryOn).filter(
+        ProductTryOn.merchant_id == current_user.merchant_id,
+    ).order_by(ProductTryOn.created_at.desc()).all()
+    return {"data": [format_try_on(row) for row in rows]}
+
+
+@router.post("/products/{product_id}/reels")
+def generate_reel(
+    product_id: int,
+    data: ReelGenerationSchema,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_merchant_can_trade),
+):
+    """Queue an AI creative generation with the reel UI contract.
+
+    The configured try-on provider produces the preview asset. A video-generation
+    provider must be configured before this endpoint can produce a 20–25 second
+    MP4 rather than a preview image.
+    """
+    if data.duration_seconds < 20 or data.duration_seconds > 25:
+        raise HTTPException(status_code=422, detail="Reel duration must be between 20 and 25 seconds.")
+    product = db.query(Product).filter(
+        Product.id == product_id,
+        Product.merchant_id == current_user.merchant_id,
+        Product.deleted_at.is_(None),
+    ).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found.")
+    model = db.query(AiModel).filter(AiModel.id == data.ai_model_id, AiModel.is_active == True).first()
+    if not model:
+        raise HTTPException(status_code=422, detail="Selected AI model is unavailable.")
+    source_image_id = data.source_image_id or (product.primary_image.id if product.primary_image else None)
+    try_on = ProductTryOn(
+        product_id=product.id,
+        ai_model_id=model.id,
+        colour_attribute_value_id=data.colour_attribute_value_id,
+        merchant_id=current_user.merchant_id,
+        source_image_id=source_image_id,
+        status="queued",
+        prompt_used=f"scene_style={data.scene_style}; requested_duration={data.duration_seconds}s",
+    )
+    db.add(try_on)
+    db.commit()
+    db.refresh(try_on)
+    background_tasks.add_task(run_try_on_background, try_on.id)
+    return {"message": "Reel preview generation queued.", "data": {**format_try_on(try_on), "scene_style": data.scene_style, "duration_seconds": data.duration_seconds}}
+
+
+@router.post("/reels/{try_on_id}/publish")
+def publish_reel(
+    try_on_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_merchant_can_trade),
+):
+    try_on = db.query(ProductTryOn).filter(
+        ProductTryOn.id == try_on_id,
+        ProductTryOn.merchant_id == current_user.merchant_id,
+    ).first()
+    if not try_on:
+        raise HTTPException(status_code=404, detail="Reel not found.")
+    if try_on.status != "completed" or not try_on.result_path:
+        raise HTTPException(status_code=422, detail="Only a completed reel preview can be published.")
+    try_on.is_published = True
+    try_on.published_at = datetime.utcnow()
+    try_on.published_by = current_user.id
+    db.commit()
+    db.refresh(try_on)
+    return {"message": "Reel published with its product tag.", "data": format_try_on(try_on)}
 
 @router.post("/try-ons/{try_on_id}/retry")
 def retry_try_on(

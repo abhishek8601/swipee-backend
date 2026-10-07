@@ -6,6 +6,8 @@ class UserRole(str, Enum):
     ADMIN = "admin"
     MERCHANT = "merchant"
     MERCHANT_STAFF = "merchant_staff"
+    BUYER = "buyer"
+    CUSTOMER = "customer"
 
     @property
     def label(self) -> str:
@@ -14,6 +16,8 @@ class UserRole(str, Enum):
             self.ADMIN: "Admin",
             self.MERCHANT: "Merchant",
             self.MERCHANT_STAFF: "Merchant Staff",
+            self.BUYER: "Buyer",
+            self.CUSTOMER: "Customer",
         }
         return labels.get(self, self.value)
 

@@ -15,7 +15,8 @@ class User(Base):
     name = Column(String(255), nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
     password = Column(String(255), nullable=False)
-    phone = Column(String(20), nullable=True)
+    phone = Column(String(20), unique=True, index=True, nullable=False)
+    gender = Column(String(32), nullable=True)
     avatar_path = Column(String(255), nullable=True)
     
     role = Column(String(50), default=UserRole.MERCHANT.value, nullable=False)
@@ -51,6 +52,14 @@ class User(Base):
     @property
     def is_merchant_staff(self) -> bool:
         return self.role == UserRole.MERCHANT_STAFF.value
+
+    @property
+    def is_customer(self) -> bool:
+        return self.role in (UserRole.BUYER.value, UserRole.CUSTOMER.value)
+
+    @property
+    def is_buyer(self) -> bool:
+        return self.role == UserRole.BUYER.value
 
     @property
     def is_merchant_side(self) -> bool:

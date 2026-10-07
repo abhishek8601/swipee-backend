@@ -12,7 +12,7 @@ from app.core.database import Base, engine
 import app.models  # Register all models for Base.metadata
 
 # API Routers
-from app.api.auth import router as auth_router
+from app.api.auth import router as auth_router, public_router as public_auth_router
 from app.api.dashboard import router as dashboard_router
 from app.api.taxonomy import router as taxonomy_router
 
@@ -23,6 +23,8 @@ from app.api.merchant.inventory import router as merchant_inventory_router
 from app.api.merchant.warehouses import router as merchant_warehouses_router
 from app.api.merchant.try_ons import router as merchant_tryons_router
 from app.api.merchant.orders import router as merchant_orders_router
+from app.api.merchant.profile import router as merchant_profile_router
+from app.api.merchant.payouts import router as merchant_payouts_router
 
 from app.api.admin.merchants import router as admin_merchants_router
 from app.api.admin.products import router as admin_products_router
@@ -30,6 +32,8 @@ from app.api.admin.ai_models import router as admin_aimodels_router
 from app.api.admin.categories import router as admin_categories_router
 from app.api.admin.brands import router as admin_brands_router
 from app.api.admin.orders import router as admin_orders_router
+from app.api.superadmin import router as superadmin_router
+from app.api.buyer import router as buyer_router
 
 app = FastAPI(
     title="Swipee API",
@@ -71,18 +75,26 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             errors[str(field)] = []
         errors[str(field)].append(msg)
 
+    content = {
+        "message": "The given data was invalid.",
+        "errors": errors
+    }
+    if request.url.path.startswith("/api/superadmin/"):
+        content = {"success": False, **content}
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={
-            "message": "The given data was invalid.",
-            "errors": errors
-        }
+        content=content
     )
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     if isinstance(exc.detail, dict):
         return JSONResponse(status_code=exc.status_code, content=exc.detail)
+    if request.url.path.startswith("/api/superadmin/"):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"success": False, "message": exc.detail, "errors": {}},
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={"message": exc.detail}
@@ -92,6 +104,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 api_prefix = "/api"
 
 app.include_router(auth_router, prefix=api_prefix)
+app.include_router(public_auth_router, prefix=api_prefix)
 app.include_router(dashboard_router, prefix=api_prefix)
 app.include_router(taxonomy_router, prefix=api_prefix)
 
@@ -103,6 +116,8 @@ app.include_router(merchant_inventory_router, prefix=api_prefix)
 app.include_router(merchant_warehouses_router, prefix=api_prefix)
 app.include_router(merchant_tryons_router, prefix=api_prefix)
 app.include_router(merchant_orders_router, prefix=api_prefix)
+app.include_router(merchant_profile_router, prefix=api_prefix)
+app.include_router(merchant_payouts_router, prefix=api_prefix)
 
 # Admin
 app.include_router(admin_merchants_router, prefix=api_prefix)
@@ -111,6 +126,8 @@ app.include_router(admin_aimodels_router, prefix=api_prefix)
 app.include_router(admin_categories_router, prefix=api_prefix)
 app.include_router(admin_brands_router, prefix=api_prefix)
 app.include_router(admin_orders_router, prefix=api_prefix)
+app.include_router(superadmin_router, prefix=api_prefix)
+app.include_router(buyer_router, prefix=api_prefix)
 
 @app.get("/")
 def root():

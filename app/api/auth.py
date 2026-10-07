@@ -7,13 +7,15 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.core.dependencies import get_current_user
 from app.models.user import User
 from app.models.misc import AuditLog
+from app.services.merchant_onboarding import ensure_merchant_account
 from app.schemas.auth import (
     LoginRequest, LoginResponse, MeResponse, UserResponse, MerchantSnippet, ChangePasswordRequest,
-    RegisterRequest
+    RegisterRequest, BuyerRegisterRequest, BuyerRegisterResponse, BuyerUserResponse
 )
 from app.core.enums import MerchantStatus, UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+public_router = APIRouter(tags=["auth"])
 
 def format_user_response(user: User) -> UserResponse:
     merchant_data = None
@@ -46,6 +48,75 @@ def format_user_response(user: User) -> UserResponse:
     )
 
 
+@public_router.post("/register/user", response_model=BuyerRegisterResponse, status_code=status.HTTP_201_CREATED)
+def register_buyer(request: Request, body: BuyerRegisterRequest, db: Session = Depends(get_db)):
+    """Register a buyer/customer account and issue an authentication token."""
+    email = str(body.email).lower()
+    phone = body.normalized_phone
+
+    duplicate_email = db.query(User.id).filter(User.email == email).first()
+    if duplicate_email:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"message": "The given data was invalid.", "errors": {"email": ["An account with this email already exists."]}},
+        )
+
+    duplicate_phone = db.query(User.id).filter(User.phone == phone).first()
+    if duplicate_phone:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"message": "The given data was invalid.", "errors": {"phone": ["An account with this phone number already exists."]}},
+        )
+
+    user = User(
+        name=body.name.strip(),
+        email=email,
+        phone=phone,
+        password=get_password_hash(body.password),
+        gender=body.gender,
+        role=UserRole.BUYER.value,
+        status="active",
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        error_text = str(getattr(exc, "orig", exc)).lower()
+        field = "phone" if "phone" in error_text else "email"
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": "The given data was invalid.",
+                "errors": {field: [f"An account with this {('phone number' if field == 'phone' else 'email')} already exists."]},
+            },
+        )
+    db.refresh(user)
+
+    user.last_login_at = datetime.utcnow()
+    user.last_login_ip = request.client.host if request.client else None
+    db.add(AuditLog(
+        user_id=user.id,
+        action="auth.buyer_registered",
+        ip_address=user.last_login_ip,
+        created_at=datetime.utcnow(),
+    ))
+    db.commit()
+
+    return BuyerRegisterResponse(
+        message="Registration successful.",
+        user=BuyerUserResponse(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            phone=user.phone,
+            gender=user.gender,
+            role=user.role,
+        ),
+        token=create_access_token(data={"sub": str(user.id), "role": user.role}),
+    )
+
+
 @router.post("/register", response_model=LoginResponse, status_code=status.HTTP_201_CREATED)
 def register(request: Request, body: RegisterRequest, db: Session = Depends(get_db)):
     """Create a standard merchant user account and immediately issue a JWT."""
@@ -67,12 +138,14 @@ def register(request: Request, body: RegisterRequest, db: Session = Depends(get_
     )
     db.add(user)
     try:
+        db.flush()
+        ensure_merchant_account(db, user)
         db.commit()
     except IntegrityError:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"errors": {"email": ["An account with this email already exists."]}}
+            detail={"errors": {"email": ["An account or merchant with this email already exists."]}}
         )
     db.refresh(user)
 
@@ -125,7 +198,7 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
     # Log audit
     audit = AuditLog(
         user_id=user.id,
-        action="auth.login",
+        action="superadmin.login" if user.role == UserRole.SUPER_ADMIN.value else "auth.login",
         ip_address=user.last_login_ip,
         created_at=datetime.utcnow()
     )
@@ -147,7 +220,19 @@ def me(current_user: User = Depends(get_current_user)):
     )
 
 @router.post("/logout")
-def logout(current_user: User = Depends(get_current_user)):
+def logout(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role == UserRole.SUPER_ADMIN.value:
+        db.add(AuditLog(
+            user_id=current_user.id,
+            action="superadmin.logout",
+            ip_address=request.client.host if request.client else None,
+            created_at=datetime.utcnow(),
+        ))
+        db.commit()
     return {"message": "Logged out successfully."}
 
 @router.post("/logout-all")

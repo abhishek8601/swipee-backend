@@ -6,6 +6,7 @@ from app.core.security import decode_access_token
 from app.models.user import User
 from app.models.merchant import Merchant
 from app.core.enums import UserRole, MerchantStatus
+from app.services.merchant_onboarding import ensure_merchant_account
 
 def get_token_from_header(authorization: Optional[str] = Header(None)) -> str:
     if not authorization:
@@ -68,6 +69,16 @@ def require_roles(*allowed_roles: str) -> Callable:
         return user
     return role_checker
 
+
+def require_super_admin(user: User = Depends(get_current_user)) -> User:
+    """Restrict the dedicated platform administration surface to super admins."""
+    if user.role != UserRole.SUPER_ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to perform this action.",
+        )
+    return user
+
 def require_permissions(*required_perms: str) -> Callable:
     def perm_checker(user: User = Depends(get_current_user)) -> User:
         if user.is_super_admin:
@@ -97,8 +108,16 @@ def require_merchant_can_trade(user: User = Depends(get_current_user)) -> User:
         )
     return user
 
-def get_current_merchant(user: User = Depends(get_current_user)) -> Merchant:
+def get_current_merchant(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Merchant:
     if not user.merchant_id or not user.merchant:
+        if user.role == UserRole.MERCHANT.value:
+            merchant = ensure_merchant_account(db, user)
+            db.commit()
+            db.refresh(merchant)
+            return merchant
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User is not associated with a merchant."
