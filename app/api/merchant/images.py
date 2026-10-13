@@ -1,5 +1,8 @@
+import io
 import os
+import re
 import time
+from PIL import Image
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
@@ -11,6 +14,9 @@ from app.models.user import User
 from app.models.product import Product, ProductImage
 
 router = APIRouter(prefix="/merchant", tags=["merchant-images"])
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+ALLOWED_IMAGE_FORMATS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 
 class ReorderSchema(BaseModel):
     order: List[int]
@@ -32,14 +38,26 @@ async def upload_product_image(
     if not product:
         raise HTTPException(status_code=404, detail="Product not found.")
 
+    content = await image.read(MAX_IMAGE_BYTES + 1)
+    if len(content) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=422, detail="Image must be 10 MB or smaller.")
+    # Trust the decoded bytes, not the client's filename or content type.
+    try:
+        with Image.open(io.BytesIO(content)) as probe:
+            fmt = probe.format
+            probe.verify()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Upload a valid JPEG, PNG or WebP image.")
+    if fmt not in ALLOWED_IMAGE_FORMATS:
+        raise HTTPException(status_code=422, detail="Upload a valid JPEG, PNG or WebP image.")
+
     dest_dir = settings.STORAGE_DIR / "products" / str(product.id)
     os.makedirs(dest_dir, exist_ok=True)
 
-    ext = os.path.splitext(image.filename)[1] or ".jpg"
-    filename = f"{int(time.time())}_{image.filename}"
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "-", os.path.splitext(os.path.basename(image.filename or "image"))[0])[:60] or "image"
+    filename = f"{int(time.time())}_{stem}{ALLOWED_IMAGE_FORMATS[fmt]}"
     file_path = dest_dir / filename
 
-    content = await image.read()
     with open(file_path, "wb") as f:
         f.write(content)
 

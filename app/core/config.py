@@ -31,8 +31,39 @@ class Settings(BaseSettings):
     TRYON_PHOTOROOM_KEY: str = ""
     HUGGINGFACE_TOKEN: str = ""
 
+    # Demo escape hatch (mirrors Laravel's tryon.allow_placeholder_publish).
+    # Placeholder looks (stub canvas, Pollinations "imagined garment") must not
+    # reach shoppers; flip only for demos.
+    TRYON_ALLOW_PLACEHOLDER_PUBLISH: bool = False
+
+    # Reel (AI video) generation. The keyframe comes from TRYON_DRIVER; this
+    # provider animates it. Empty VIDEO_PROVIDER means "not configured" and the
+    # API refuses to queue reels rather than pretending to render one.
+    VIDEO_PROVIDER: str = ""  # replicate
+    REPLICATE_API_TOKEN: str = ""
+    REPLICATE_VIDEO_MODEL: str = ""  # "owner/name" of an image-to-video model on replicate.com
+    REPLICATE_IMAGE_INPUT_KEY: str = "image"
+    REPLICATE_DURATION_INPUT_KEY: str = ""  # set only if the chosen model accepts a duration input
+    VIDEO_JOB_TIMEOUT_SECONDS: int = 900
+    VIDEO_MAX_BYTES: int = 200 * 1024 * 1024
+    REEL_DAILY_LIMIT_PER_MERCHANT: int = 20
+    REEL_MAX_ACTIVE_PER_MERCHANT: int = 3
+
+    # Google Drive storage for generated reels. Auth is either a service account
+    # (JSON key file kept outside the repo; folder must live in a Shared Drive,
+    # service accounts have no My Drive quota) or an OAuth refresh token.
+    GOOGLE_DRIVE_FOLDER_ID: str = ""
+    GOOGLE_SERVICE_ACCOUNT_FILE: str = ""
+    GOOGLE_DRIVE_CLIENT_ID: str = ""
+    GOOGLE_DRIVE_CLIENT_SECRET: str = ""
+    GOOGLE_DRIVE_REFRESH_TOKEN: str = ""
+    GOOGLE_DRIVE_SCOPE: str = "https://www.googleapis.com/auth/drive"
+
     # Storage
     STORAGE_DIR: Path = BASE_DIR / "storage" / "app" / "public"
+    # Not mounted under /storage: generated videos are served through the
+    # access-controlled /api/reels/{id}/video endpoint only.
+    PRIVATE_STORAGE_DIR: Path = BASE_DIR / "storage" / "app" / "private"
 
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),
@@ -50,3 +81,4 @@ class Settings(BaseSettings):
 
 settings = Settings()
 os.makedirs(settings.STORAGE_DIR, exist_ok=True)
+os.makedirs(settings.PRIVATE_STORAGE_DIR, exist_ok=True)

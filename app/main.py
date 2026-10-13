@@ -34,6 +34,8 @@ from app.api.admin.brands import router as admin_brands_router
 from app.api.admin.orders import router as admin_orders_router
 from app.api.superadmin import router as superadmin_router
 from app.api.buyer import router as buyer_router
+from app.api.reels import router as reels_router
+from app.services.reel_service import resume_pending_reels
 
 app = FastAPI(
     title="Swipee API",
@@ -128,6 +130,12 @@ app.include_router(admin_brands_router, prefix=api_prefix)
 app.include_router(admin_orders_router, prefix=api_prefix)
 app.include_router(superadmin_router, prefix=api_prefix)
 app.include_router(buyer_router, prefix=api_prefix)
+app.include_router(reels_router, prefix=api_prefix)
+
+@app.on_event("startup")
+async def resume_reel_jobs():
+    # Background tasks die with the process; reels carry enough state to resume.
+    await resume_pending_reels()
 
 @app.get("/")
 def root():

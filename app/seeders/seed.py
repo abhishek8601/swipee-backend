@@ -12,6 +12,7 @@ from app.models.product import Product, ProductVariant, ProductImage, ProductAtt
 from app.models.inventory import Warehouse, Inventory, InventoryMovement
 from app.models.order import Customer, Order, OrderItem
 from app.models.ai_model import AiModel
+from app.services.ai_model_roster import ensure_default_ai_models
 from app.services.inventory_service import InventoryService
 
 def run_seed():
@@ -46,6 +47,18 @@ def run_seed():
                 email_verified_at=datetime.utcnow()
             )
             db.add(admin)
+
+        buyer = db.query(User).filter(User.email == "buyer@swipee.test").first()
+        if not buyer:
+            buyer = User(
+                name="Aarav Sharma",
+                email="buyer@swipee.test",
+                password=hashed_pw,
+                role=UserRole.BUYER.value,
+                status="active",
+                email_verified_at=datetime.utcnow()
+            )
+            db.add(buyer)
 
         db.commit()
 
@@ -144,27 +157,7 @@ def run_seed():
             brand_map[b_name] = b
 
         print("Seeding AI Models...")
-        models_data = [
-            ("Arjun", "arjun", "male", "Athletic", "185 cm", "M", "Indian male model, fit build"),
-            ("Meera", "meera", "female", "Slender", "172 cm", "S", "Indian female model, elegant look"),
-            ("Kabir", "kabir", "male", "Average", "178 cm", "L", "Indian male model, casual lifestyle"),
-            ("Ananya", "ananya", "female", "Petite", "165 cm", "XS", "Indian female model, vibrant modern style"),
-        ]
-        for name, slug, gender, body, height, size, desc in models_data:
-            m = db.query(AiModel).filter(AiModel.slug == slug).first()
-            if not m:
-                m = AiModel(
-                    name=name,
-                    slug=slug,
-                    gender=gender,
-                    body_type=body,
-                    height_cm=height,
-                    reference_size=size,
-                    description=desc,
-                    supported_categories=["men-t-shirts", "men-shirts", "sneakers"],
-                    is_active=True
-                )
-                db.add(m)
+        ensure_default_ai_models(db)
 
         db.commit()
 

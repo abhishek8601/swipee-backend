@@ -1,17 +1,19 @@
 from datetime import datetime
 from typing import Dict, Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.enums import MerchantStatus, ProductStatus, UserRole
+from app.models.ai_model import ProductTryOn
 from app.models.buyer import BodyProfile, Cart, CartItem, UserAddress, WishlistItem
 from app.models.inventory import Inventory
 from app.models.order import Customer, Order, OrderItem
 from app.models.product import Product, ProductVariant
 from app.models.taxonomy import Category
 from app.models.user import User
+from app.services import reel_service
 
 router = APIRouter(tags=["buyer"])
 
@@ -67,6 +69,28 @@ def products(category_id: Optional[int] = None, search: Optional[str] = None, db
     if category_id: q = q.filter(Product.category_id == category_id)
     if search: q = q.filter(Product.name.ilike(f"%{search}%"))
     return {"success": True, "message": "Products fetched successfully.", "data": [{"id": p.id, "name": p.name, "price": float(p.selling_price), "merchant": p.merchant.display_name, "thumbnail_url": f"/storage/{p.primary_image.image_path}" if p.primary_image else None} for p in q.all() if product_visible(p)]}
+def reel_feed_item(reel):
+    p = reel.product
+    variants = []
+    for v in p.variants:
+        if v.deleted_at is not None or not v.is_active: continue
+        available = sum(i.on_hand - i.reserved for i in v.inventory)
+        variants.append({"id": v.id, "sku": v.sku, "size": v.size_value.label if v.size_value else None, "colour": v.colour_value.label if v.colour_value else None, "price": float(v.effective_selling_price), "mrp": float(v.effective_mrp), "in_stock": available > 0})
+    return {
+        "id": reel.id,
+        "video_url": f"/api/reels/{reel.id}/video",
+        "poster_url": f"/storage/{reel.thumb_path}" if reel.thumb_path else None,
+        "ai_model": {"id": reel.ai_model_id, "name": reel.ai_model.name if reel.ai_model else None},
+        "merchant": {"id": p.merchant.id, "name": p.merchant.display_name},
+        "product": {"id": p.id, "name": p.name, "slug": p.slug, "price": float(p.selling_price), "mrp": float(p.mrp), "category": p.category.name if p.category else None, "thumbnail_url": f"/storage/{p.primary_image.image_path}" if p.primary_image else None, "variants": variants},
+        "published_at": reel.published_at.isoformat() if reel.published_at else None,
+    }
+@router.get("/feed/reels")
+def reel_feed(page: int = Query(1, ge=1), per_page: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)):
+    q = reel_service.feed_query(db)
+    total = q.count()
+    rows = q.order_by(ProductTryOn.published_at.desc(), ProductTryOn.id.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    return {"success": True, "message": "Reels fetched successfully.", "data": [reel_feed_item(r) for r in rows], "meta": {"page": page, "per_page": per_page, "total": total, "has_more": page * per_page < total}}
 @router.get("/wishlist")
 def wishlist(db: Session = Depends(get_db), user: User = Depends(buyer)): return {"success": True, "message": "Wishlist fetched successfully.", "data": [{"id": w.id, "product_id": w.product_id, "name": w.product.name} for w in db.query(WishlistItem).filter_by(user_id=user.id).all()]}
 @router.post("/wishlist")

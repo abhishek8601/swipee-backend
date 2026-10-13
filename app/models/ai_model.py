@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Numeric
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Numeric, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -62,8 +62,35 @@ class ProductTryOn(Base):
     published_at = Column(DateTime, nullable=True)
     published_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
+    # Reel (video) fields. An image try-on leaves these empty; a reel uses the
+    # try-on render above as its keyframe and the video provider animates it.
+    media_type = Column(String(20), default="image", nullable=False, server_default="image")  # image, video
+    scene_style = Column(String(50), nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    video_path = Column(String(255), nullable=True)  # relative to PRIVATE_STORAGE_DIR
+    video_provider = Column(String(50), nullable=True)
+    video_job_id = Column(String(255), nullable=True)
+    generation_attempts = Column(Integer, default=0, nullable=False, server_default="0")
+    lease_until = Column(DateTime, nullable=True)  # worker claim, prevents two workers on one reel
+    idempotency_key = Column(String(64), nullable=True)
+
+    # Upload status is tracked apart from generation so a finished video whose
+    # Drive upload failed can be re-uploaded without re-rendering.
+    storage_status = Column(String(30), nullable=True)  # pending, uploading, uploaded, failed, not_configured
+    storage_provider = Column(String(30), nullable=True)
+    storage_file_id = Column(String(255), nullable=True)
+    storage_error = Column(Text, nullable=True)
+    storage_attempts = Column(Integer, default=0, nullable=False, server_default="0")
+    stored_at = Column(DateTime, nullable=True)
+
+    moderation_status = Column(String(30), nullable=True)  # approved, rejected, disabled (set by super admin)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("merchant_id", "idempotency_key", name="uq_try_on_merchant_idempotency"),
+    )
 
     product = relationship("Product", back_populates="try_ons")
     ai_model = relationship("AiModel", back_populates="try_ons")

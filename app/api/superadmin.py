@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.core.dependencies import require_super_admin
 from app.core.enums import MerchantStatus, ProductStatus, UserRole
 from app.models.ai_model import AiModel, ProductTryOn
+from app.services import reel_service
 from app.models.merchant import Merchant
 from app.models.misc import AuditLog, Payout
 from app.models.order import Order, OrderItem
@@ -79,7 +80,7 @@ def user_data(user: User) -> dict:
 
 
 def reel_data(reel: ProductTryOn) -> dict:
-    return {"id": reel.id, "merchant": {"id": reel.merchant_id, "name": reel.merchant.display_name if reel.merchant else None}, "product": {"id": reel.product_id, "name": reel.product.name if reel.product else None}, "ai_model": {"id": reel.ai_model_id, "name": reel.ai_model.name if reel.ai_model else None}, "status": reel.status, "is_published": bool(reel.is_published), "result_url": f"/storage/{reel.result_path}" if reel.result_path else None, "error_message": reel.error_message, "created_at": reel.created_at.isoformat() if reel.created_at else None}
+    return {"id": reel.id, "merchant": {"id": reel.merchant_id, "name": reel.merchant.display_name if reel.merchant else None}, "product": {"id": reel.product_id, "name": reel.product.name if reel.product else None}, "ai_model": {"id": reel.ai_model_id, "name": reel.ai_model.name if reel.ai_model else None}, "status": reel.status, "is_published": bool(reel.is_published), "result_url": f"/storage/{reel.result_path}" if reel.result_path else None, "media_type": reel.media_type or "image", "video_url": reel_service.signed_video_url(reel) if reel.media_type == "video" else None, "storage_status": reel.storage_status, "moderation_status": reel.moderation_status, "error_message": reel.error_message, "created_at": reel.created_at.isoformat() if reel.created_at else None}
 
 
 def payout_data(p: Payout) -> dict:
@@ -291,6 +292,8 @@ def moderate_reel(reel_id: int, publish: bool, body: Optional[ReasonInput], acti
     reel = db.query(ProductTryOn).filter(ProductTryOn.id == reel_id).first()
     if not reel: raise HTTPException(404, "Reel not found.")
     reel.is_published = publish
+    # Recorded so a merchant cannot simply republish what moderation took down.
+    reel.moderation_status = "approved" if publish else action.rsplit("_", 1)[-1]
     if publish: reel.published_at, reel.published_by, reel.error_message = datetime.utcnow(), admin.id, None
     elif body: reel.error_message = body.reason
     log(db, admin, action, reel, request, body.reason if body else message); db.commit()
