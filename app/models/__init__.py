@@ -5,7 +5,7 @@ from app.models.product import Product, ProductVariant, ProductImage, ProductAtt
 from app.models.inventory import Warehouse, Inventory, InventoryMovement
 from app.models.order import Customer, Order, OrderItem, Shipment, Return
 from app.models.ai_model import AiModel, ProductTryOn
-from app.models.misc import AuditLog, CommissionRule, Payout, BulkImportJob
+from app.models.misc import AuditLog, CommissionRule, Payout, BulkImportJob, PasswordResetCode
 from app.models.buyer import BodyProfile, WishlistItem, Cart, CartItem, UserAddress, SizePreference
 
 __all__ = [
@@ -16,6 +16,6 @@ __all__ = [
     "Warehouse", "Inventory", "InventoryMovement",
     "Customer", "Order", "OrderItem", "Shipment", "Return",
     "AiModel", "ProductTryOn",
-    "AuditLog", "CommissionRule", "Payout", "BulkImportJob",
+    "AuditLog", "CommissionRule", "Payout", "BulkImportJob", "PasswordResetCode",
     "BodyProfile", "WishlistItem", "Cart", "CartItem", "UserAddress", "SizePreference",
 ]

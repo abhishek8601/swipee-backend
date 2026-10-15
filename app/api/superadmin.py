@@ -1,4 +1,5 @@
 """Super-admin-only platform operations using the project's existing models."""
+import re
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -12,8 +13,8 @@ from app.api.merchant.products import format_product_detail, format_product_list
 from app.core.database import get_db
 from app.core.dependencies import require_super_admin
 from app.core.enums import MerchantStatus, ProductStatus, UserRole
-from app.models.ai_model import AiModel, ProductTryOn
-from app.services import reel_service
+from app.models.ai_model import IMPORTED_FROM_DRIVE, AiModel, ProductTryOn
+from app.services import drive_storage, reel_service
 from app.models.merchant import Merchant
 from app.models.misc import AuditLog, Payout
 from app.models.order import Order, OrderItem
@@ -80,7 +81,7 @@ def user_data(user: User) -> dict:
 
 
 def reel_data(reel: ProductTryOn) -> dict:
-    return {"id": reel.id, "merchant": {"id": reel.merchant_id, "name": reel.merchant.display_name if reel.merchant else None}, "product": {"id": reel.product_id, "name": reel.product.name if reel.product else None}, "ai_model": {"id": reel.ai_model_id, "name": reel.ai_model.name if reel.ai_model else None}, "status": reel.status, "is_published": bool(reel.is_published), "result_url": f"/storage/{reel.result_path}" if reel.result_path else None, "media_type": reel.media_type or "image", "video_url": reel_service.signed_video_url(reel) if reel.media_type == "video" else None, "storage_status": reel.storage_status, "moderation_status": reel.moderation_status, "error_message": reel.error_message, "created_at": reel.created_at.isoformat() if reel.created_at else None}
+    return {"id": reel.id, "merchant": {"id": reel.merchant_id, "name": reel.merchant.display_name if reel.merchant else None}, "product": {"id": reel.product_id, "name": reel.product.name if reel.product else None}, "ai_model": {"id": reel.ai_model_id, "name": reel.ai_model.name if reel.ai_model else None}, "status": reel.status, "is_published": bool(reel.is_published), "result_url": f"/storage/{reel.result_path}" if reel.result_path else None, "media_type": reel.media_type or "image", "video_url": reel_service.signed_video_url(reel) if reel.media_type == "video" else None, "storage_status": reel.storage_status, "moderation_status": reel.moderation_status, "source": "drive" if reel.video_provider == IMPORTED_FROM_DRIVE else "ai", "drive_file_id": reel.storage_file_id, "poster_url": reel_service.poster_url(reel), "product_price": float(reel.product.selling_price) if reel.product else None, "error_message": reel.error_message, "created_at": reel.created_at.isoformat() if reel.created_at else None}
 
 
 def payout_data(p: Payout) -> dict:
@@ -297,6 +298,144 @@ def moderate_reel(reel_id: int, publish: bool, body: Optional[ReasonInput], acti
     if publish: reel.published_at, reel.published_by, reel.error_message = datetime.utcnow(), admin.id, None
     elif body: reel.error_message = body.reason
     log(db, admin, action, reel, request, body.reason if body else message); db.commit()
+    return success(message, reel_data(reel))
+
+
+class DriveImportInput(BaseModel):
+    product_id: int
+    publish: bool = True
+
+
+def drive_video_data(f: dict, imported: Optional[ProductTryOn]) -> dict:
+    meta = f.get("videoMediaMetadata") or {}
+    width, height = meta.get("width"), meta.get("height")
+    return {
+        "file_id": f["id"],
+        "name": f.get("name"),
+        "mime_type": f.get("mimeType"),
+        "size_bytes": int(f["size"]) if f.get("size") else None,
+        "duration_seconds": round(int(meta["durationMillis"]) / 1000, 1) if meta.get("durationMillis") else None,
+        "width": width,
+        "height": height,
+        "is_vertical": bool(width and height and height > width),
+        "created_at": f.get("createdTime"),
+        "preview_url": reel_service.signed_drive_url(f["id"], "video"),
+        "thumbnail_url": reel_service.signed_drive_url(f["id"], "thumbnail") if f.get("hasThumbnail") else None,
+        "imported_reel": reel_data(imported) if imported else None,
+    }
+
+
+def drive_unavailable() -> Optional[str]:
+    if not drive_storage.can_read():
+        return "Google Drive is not connected: set GOOGLE_SERVICE_ACCOUNT_FILE in the backend .env."
+    return None
+
+
+DRIVE_ID = re.compile(r"(?:/d/|[?&]id=)([A-Za-z0-9_-]{10,})|^([A-Za-z0-9_-]{10,})$")
+
+
+def drive_file_id_from(link: str) -> Optional[str]:
+    """Accepts a Drive share link (.../file/d/<id>/view, ...?id=<id>) or a bare file ID."""
+    m = DRIVE_ID.search(link.strip())
+    return (m.group(1) or m.group(2)) if m else None
+
+
+async def readable_video(file_id: str) -> dict:
+    try:
+        f = await drive_storage.get_file(file_id)
+    except drive_storage.DriveError as e:
+        raise HTTPException(502, str(e))
+    if not f or f.get("trashed") or not str(f.get("mimeType", "")).startswith("video/"):
+        raise HTTPException(404, "No video found for that link. Check it's a video and that it's shared with the service account (or 'Anyone with the link').")
+    return f
+
+
+@router.get("/drive/videos")
+async def list_drive_videos(db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """Videos in the Google Drive reels folder, each marked with its imported reel (if any)."""
+    problem = drive_unavailable()
+    if problem:
+        raise HTTPException(503, problem)
+    folder = drive_storage.reels_folder_id()
+    if not folder:
+        # Videos can still be added one at a time by link (/drive/lookup).
+        return success("No reels folder configured; add videos by link.", [], {"folder_id": None, "total": 0})
+    try:
+        files = await drive_storage.list_folder_videos(folder)
+    except drive_storage.DriveError as e:
+        raise HTTPException(502, str(e))
+    ids = [f["id"] for f in files]
+    imported = {r.storage_file_id: r for r in db.query(ProductTryOn).filter(
+        ProductTryOn.video_provider == IMPORTED_FROM_DRIVE, ProductTryOn.storage_file_id.in_(ids))} if ids else {}
+    return success("Drive videos retrieved successfully.", [drive_video_data(f, imported.get(f["id"])) for f in files], {"folder_id": drive_storage.reels_folder_id(), "total": len(files)})
+
+
+@router.get("/drive/lookup")
+async def lookup_drive_video(link: str = Query(..., min_length=10), db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """Resolve a pasted Drive link to a video the super admin can preview and import."""
+    problem = drive_unavailable()
+    if problem:
+        raise HTTPException(503, problem)
+    file_id = drive_file_id_from(link)
+    if not file_id:
+        raise HTTPException(422, "That doesn't look like a Google Drive link or file ID.")
+    f = await readable_video(file_id)
+    imported = db.query(ProductTryOn).filter(ProductTryOn.video_provider == IMPORTED_FROM_DRIVE, ProductTryOn.storage_file_id == file_id).first()
+    return success("Video found.", drive_video_data(f, imported))
+
+
+@router.post("/drive/videos/{file_id}/import")
+async def import_drive_video(file_id: str, body: DriveImportInput, request: Request, db: Session = Depends(get_db), admin: User = Depends(require_super_admin)):
+    """Turn a Drive video into a reel for a product. The video stays in Drive and is
+    streamed from there; nothing is copied. One reel per Drive file."""
+    problem = drive_unavailable()
+    if problem:
+        raise HTTPException(503, problem)
+    existing = db.query(ProductTryOn).filter(ProductTryOn.video_provider == IMPORTED_FROM_DRIVE, ProductTryOn.storage_file_id == file_id).first()
+    if existing:
+        raise HTTPException(409, {"message": "This video is already imported.", "data": reel_data(existing)})
+
+    product = db.query(Product).filter(Product.id == body.product_id, Product.deleted_at.is_(None)).first()
+    if not product:
+        raise HTTPException(404, "Product not found.")
+    # Any video the service account can read: it only sees what was shared with it.
+    f = await readable_video(file_id)
+
+    meta = f.get("videoMediaMetadata") or {}
+    primary = product.primary_image
+    now = datetime.utcnow()
+    reel = ProductTryOn(
+        product_id=product.id,
+        merchant_id=product.merchant_id,
+        ai_model_id=None,
+        source_image_id=primary.id if primary else None,
+        status="completed",
+        media_type="video",
+        provider=IMPORTED_FROM_DRIVE,
+        video_provider=IMPORTED_FROM_DRIVE,
+        is_placeholder=False,
+        storage_status="uploaded",
+        storage_provider="google_drive",
+        storage_file_id=file_id,
+        stored_at=now,
+        duration_seconds=round(int(meta["durationMillis"]) / 1000) if meta.get("durationMillis") else None,
+        moderation_status="approved",
+        prompt_used=f"Imported from Google Drive: {f.get('name')}",
+    )
+    reel.product = product
+    warnings = []
+    if body.publish:
+        warnings = reel_service.publish_blockers(reel)
+        if not warnings:
+            reel.is_published, reel.published_at, reel.published_by = True, now, admin.id
+    db.add(reel)
+    db.flush()
+    log(db, admin, "superadmin.reel_imported_from_drive", reel, request, f"{f.get('name')} -> product #{product.id}")
+    db.commit()
+    db.refresh(reel)
+    message = "Reel imported and published to the buyer feed." if reel.is_published else "Reel imported (not published)."
+    if warnings:
+        message = "Reel imported but not published: " + " ".join(warnings)
     return success(message, reel_data(reel))
 
 

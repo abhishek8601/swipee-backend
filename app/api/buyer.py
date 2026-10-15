@@ -79,7 +79,7 @@ def reel_feed_item(reel):
     return {
         "id": reel.id,
         "video_url": f"/api/reels/{reel.id}/video",
-        "poster_url": f"/storage/{reel.thumb_path}" if reel.thumb_path else None,
+        "poster_url": reel_service.poster_url(reel),
         "ai_model": {"id": reel.ai_model_id, "name": reel.ai_model.name if reel.ai_model else None},
         "merchant": {"id": p.merchant.id, "name": p.merchant.display_name},
         "product": {"id": p.id, "name": p.name, "slug": p.slug, "price": float(p.selling_price), "mrp": float(p.mrp), "category": p.category.name if p.category else None, "thumbnail_url": f"/storage/{p.primary_image.image_path}" if p.primary_image else None, "variants": variants},

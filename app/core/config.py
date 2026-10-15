@@ -53,11 +53,32 @@ class Settings(BaseSettings):
     # (JSON key file kept outside the repo; folder must live in a Shared Drive,
     # service accounts have no My Drive quota) or an OAuth refresh token.
     GOOGLE_DRIVE_FOLDER_ID: str = ""
+    # Folder of ready-made reel videos the super admin imports (defaults to GOOGLE_DRIVE_FOLDER_ID).
+    GOOGLE_DRIVE_REELS_FOLDER_ID: str = ""
     GOOGLE_SERVICE_ACCOUNT_FILE: str = ""
     GOOGLE_DRIVE_CLIENT_ID: str = ""
     GOOGLE_DRIVE_CLIENT_SECRET: str = ""
     GOOGLE_DRIVE_REFRESH_TOKEN: str = ""
     GOOGLE_DRIVE_SCOPE: str = "https://www.googleapis.com/auth/drive"
+
+    # Google sign-in for buyers: comma-separated OAuth client IDs whose ID
+    # tokens are accepted (web, Android and iOS clients of the same project).
+    GOOGLE_OAUTH_CLIENT_IDS: str = ""
+
+    # Outgoing mail (same names as the Laravel app). "log" only writes the
+    # message to the server log, nothing is delivered; use "smtp" to send.
+    MAIL_MAILER: str = "log"  # log, smtp
+    MAIL_HOST: str = ""
+    MAIL_PORT: int = 587
+    MAIL_USERNAME: str = ""
+    MAIL_PASSWORD: str = ""
+    MAIL_ENCRYPTION: str = "tls"  # tls (STARTTLS), ssl, none
+    MAIL_FROM_ADDRESS: str = "no-reply@swiipe.local"
+    MAIL_FROM_NAME: str = "Swiipe"
+
+    PASSWORD_RESET_CODE_TTL_MINUTES: int = 15
+    PASSWORD_RESET_MAX_ATTEMPTS: int = 5
+    PASSWORD_RESET_RESEND_SECONDS: int = 60
 
     # Storage
     STORAGE_DIR: Path = BASE_DIR / "storage" / "app" / "public"

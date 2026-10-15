@@ -5,6 +5,20 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from app.core.database import Base
 
+class PasswordResetCode(Base):
+    """One emailed reset code. Only a hash is stored; rows are single-use."""
+    __tablename__ = "password_reset_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    code_hash = Column(String(128), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    used_at = Column(DateTime, nullable=True)  # also set when superseded by a newer code
+    requested_ip = Column(String(45), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

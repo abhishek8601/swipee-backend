@@ -6,7 +6,7 @@ from app.core.security import decode_access_token
 from app.models.user import User
 from app.models.merchant import Merchant
 from app.core.enums import UserRole, MerchantStatus
-from app.services.merchant_onboarding import ensure_merchant_account
+from app.services.merchant_onboarding import ensure_merchant_account, merchant_access_block_reason
 
 def get_token_from_header(authorization: Optional[str] = Header(None)) -> str:
     if not authorization:
@@ -49,12 +49,10 @@ def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This account has been deactivated. Contact your administrator."
         )
-    if user.is_merchant_side and user.merchant:
-        if user.merchant.status == MerchantStatus.SUSPENDED.value:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Your merchant account is suspended. Contact support."
-            )
+    # Tokens issued before approval (or before a suspension) stop working too.
+    blocked = merchant_access_block_reason(user)
+    if blocked:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=blocked)
     return user
 
 def require_roles(*allowed_roles: str) -> Callable:

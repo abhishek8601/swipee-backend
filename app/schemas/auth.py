@@ -3,6 +3,14 @@ from typing import Literal, Optional, List, Any
 from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, ValidationInfo, field_validator, model_validator
 
+def normalize_phone(value: str) -> str:
+    """Shared phone rule for buyer sign-ups: strip spaces/dashes, E.164-like digits."""
+    normalized = value.replace(" ", "").replace("-", "")
+    if not re.fullmatch(r"\+?[1-9]\d{6,14}", normalized):
+        raise ValueError("Phone must be a valid phone number.")
+    return normalized
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -45,10 +53,7 @@ class BuyerRegisterRequest(BaseModel):
     @field_validator("phone")
     @classmethod
     def phone_must_be_valid(cls, value: str) -> str:
-        normalized = value.replace(" ", "").replace("-", "")
-        if not re.fullmatch(r"\+?[1-9]\d{6,14}", normalized):
-            raise ValueError("Phone must be a valid phone number.")
-        return normalized
+        return normalize_phone(value)
 
     @field_validator("password_confirmation")
     @classmethod
@@ -67,6 +72,42 @@ class BuyerRegisterRequest(BaseModel):
     @property
     def normalized_phone(self) -> str:
         return self.phone
+
+
+class GoogleLoginRequest(BaseModel):
+    """Buyer Google sign-in. First-time users repeat the call with phone + terms."""
+
+    id_token: str = Field(min_length=20)
+    phone: Optional[str] = Field(default=None, max_length=20)
+    gender: Optional[Literal["male", "female", "prefer_not_to_say"]] = None
+    terms_accepted: Optional[bool] = None
+    device_name: Optional[str] = "mobile"
+
+    @field_validator("phone")
+    @classmethod
+    def phone_must_be_valid(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_phone(value) if value else None
+
+
+class ForgotPasswordRequest(BaseModel):
+    # Plain str, not EmailStr: this only looks up an existing account, and
+    # EmailStr rejects reserved domains (e.g. the demo accounts' "@swipee.test")
+    # that login accepts.
+    email: str = Field(min_length=3, max_length=255, pattern=r"^[^\s@]+@[^\s@]+$")
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=255, pattern=r"^[^\s@]+@[^\s@]+$")
+    code: str = Field(pattern=r"^\s*\d{6}\s*$")
+    password: str = Field(min_length=8, max_length=128)
+    password_confirmation: str
+
+    @field_validator("password_confirmation")
+    @classmethod
+    def passwords_must_match(cls, value: str, info: ValidationInfo) -> str:
+        if "password" in info.data and value != info.data["password"]:
+            raise ValueError("Password confirmation does not match.")
+        return value
 
 
 class MerchantSnippet(BaseModel):
@@ -119,6 +160,14 @@ class BuyerRegisterResponse(BaseModel):
     message: str
     user: BuyerUserResponse
     token: str
+
+
+class MerchantRegisterResponse(BaseModel):
+    """Merchant sign-up result. No token: the account must be approved by a super admin first."""
+    success: bool = True
+    message: str
+    requires_approval: bool = True
+    user: UserResponse
 
 
 class MeResponse(BaseModel):

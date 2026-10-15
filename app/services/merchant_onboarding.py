@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -16,6 +17,35 @@ def _unique_slug(db: Session, display_name: str) -> str:
         slug = f"{base}-{suffix}"
         suffix += 1
     return slug
+
+
+AWAITING_APPROVAL_MESSAGE = (
+    "Your merchant account is awaiting approval by the Swipee team. "
+    "You can log in once a super admin approves it."
+)
+
+
+def merchant_access_block_reason(user: User) -> Optional[str]:
+    """Why a merchant-side user may not sign in or use the API, or None if they may.
+
+    Merchant owners and staff get access only once a super admin has approved
+    the merchant account; until then (and after rejection or suspension) the
+    account is locked out.
+    """
+    if not user.is_merchant_side:
+        return None
+    merchant = user.merchant
+    if merchant is None or merchant.deleted_at is not None:
+        return AWAITING_APPROVAL_MESSAGE if merchant is None else "This merchant account no longer exists. Contact support."
+    status = merchant.status
+    if status == MerchantStatus.APPROVED.value:
+        return None
+    if status == MerchantStatus.SUSPENDED.value:
+        return "Your merchant account is suspended. Contact support."
+    if status == MerchantStatus.REJECTED.value:
+        reason = f" Reason: {merchant.status_reason}" if merchant.status_reason else ""
+        return f"Your merchant application was not approved.{reason} Contact support for help."
+    return AWAITING_APPROVAL_MESSAGE  # pending, under_review
 
 
 def ensure_merchant_account(db: Session, user: User) -> Merchant:

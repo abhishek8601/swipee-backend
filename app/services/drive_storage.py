@@ -43,7 +43,17 @@ def auth_mode() -> Optional[str]:
 
 
 def is_configured() -> bool:
+    """Uploads need a destination folder as well as credentials."""
     return bool(settings.GOOGLE_DRIVE_FOLDER_ID and auth_mode())
+
+
+def can_read() -> bool:
+    """Streaming or listing existing files only needs credentials."""
+    return bool(auth_mode())
+
+
+def reels_folder_id() -> str:
+    return settings.GOOGLE_DRIVE_REELS_FOLDER_ID or settings.GOOGLE_DRIVE_FOLDER_ID
 
 
 def missing_configuration() -> list[str]:
@@ -251,3 +261,58 @@ async def delete_file(file_id: str) -> None:
         resp = await _request(client, "DELETE", f"{FILES_URI}/{file_id}", params={"supportsAllDrives": "true"})
         if resp.status_code not in (204, 404):
             raise DriveError(_drive_error("delete file", resp))
+
+
+VIDEO_FIELDS = "id,name,mimeType,size,createdTime,modifiedTime,parents,videoMediaMetadata(width,height,durationMillis),hasThumbnail,trashed"
+
+
+async def list_folder_videos(folder_id: str) -> list[dict]:
+    """Every (non-trashed) video directly inside a Drive folder, newest first."""
+    if not can_read():
+        raise DriveError("Google Drive credentials are not configured.")
+    files: list[dict] = []
+    page_token = None
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            params = {
+                "q": f"'{folder_id}' in parents and mimeType contains 'video/' and trashed = false",
+                "fields": f"nextPageToken,files({VIDEO_FIELDS})",
+                "orderBy": "createdTime desc",
+                "pageSize": "200",
+                "supportsAllDrives": "true",
+                "includeItemsFromAllDrives": "true",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await _request(client, "GET", FILES_URI, params=params)
+            if resp.status_code != 200:
+                raise DriveError(_drive_error("list the reels folder", resp), retryable=resp.status_code in RETRYABLE)
+            body = resp.json()
+            files.extend(body.get("files", []))
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                return files
+
+
+async def get_file(file_id: str) -> Optional[dict]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await _request(client, "GET", f"{FILES_URI}/{file_id}", params={"fields": VIDEO_FIELDS, "supportsAllDrives": "true"})
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise DriveError(_drive_error("read the file", resp), retryable=resp.status_code in RETRYABLE)
+    return resp.json()
+
+
+async def thumbnail_bytes(file_id: str) -> Optional[tuple[bytes, str]]:
+    """Drive's generated preview frame for a video, or None if it has none yet."""
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        meta = await _request(client, "GET", f"{FILES_URI}/{file_id}", params={"fields": "thumbnailLink", "supportsAllDrives": "true"})
+        link = meta.json().get("thumbnailLink") if meta.status_code == 200 else None
+        if not link:
+            return None
+        # thumbnailLink is short-lived and needs the same bearer token for private files.
+        resp = await _request(client, "GET", link.replace("=s220", "=s640"))
+        if resp.status_code != 200:
+            return None
+        return resp.content, resp.headers.get("content-type", "image/jpeg")

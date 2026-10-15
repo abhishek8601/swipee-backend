@@ -1,16 +1,21 @@
+import secrets
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import verify_password, get_password_hash, create_access_token
 from app.core.dependencies import get_current_user
 from app.models.user import User
 from app.models.misc import AuditLog
-from app.services.merchant_onboarding import ensure_merchant_account
+from app.services import google_auth, password_reset
+from app.services.merchant_onboarding import ensure_merchant_account, merchant_access_block_reason
 from app.schemas.auth import (
     LoginRequest, LoginResponse, MeResponse, UserResponse, MerchantSnippet, ChangePasswordRequest,
-    RegisterRequest, BuyerRegisterRequest, BuyerRegisterResponse, BuyerUserResponse
+    RegisterRequest, BuyerRegisterRequest, BuyerRegisterResponse, BuyerUserResponse, MerchantRegisterResponse, GoogleLoginRequest,
+    ForgotPasswordRequest, ResetPasswordRequest
 )
 from app.core.enums import MerchantStatus, UserRole
 
@@ -117,9 +122,13 @@ def register_buyer(request: Request, body: BuyerRegisterRequest, db: Session = D
     )
 
 
-@router.post("/register", response_model=LoginResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=MerchantRegisterResponse, status_code=status.HTTP_201_CREATED)
 def register(request: Request, body: RegisterRequest, db: Session = Depends(get_db)):
-    """Create a standard merchant user account and immediately issue a JWT."""
+    """Create a merchant account in "pending" status.
+
+    No token is issued: the merchant can log in only after a super admin
+    approves the account (POST /superadmin/merchants/{id}/approve).
+    """
     email = str(body.email).lower()
     existing_user = db.query(User).filter(User.email == email).first()
     if existing_user:
@@ -159,10 +168,9 @@ def register(request: Request, body: RegisterRequest, db: Session = Depends(get_
     ))
     db.commit()
 
-    return LoginResponse(
-        token=create_access_token(data={"sub": str(user.id), "role": user.role}),
+    return MerchantRegisterResponse(
+        message="Registration submitted. You can log in once a super admin approves your merchant account.",
         user=format_user_response(user),
-        must_change_password=False,
     )
 
 
@@ -182,10 +190,18 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
             detail={"errors": {"email": ["This account has been deactivated. Contact your administrator."]}}
         )
 
-    if user.is_merchant_side and user.merchant and user.merchant.status == MerchantStatus.SUSPENDED.value:
+    if user.role == UserRole.MERCHANT.value and not user.merchant_id and user.phone:
+        # Older merchant users with no merchant profile: create the pending
+        # profile now so it shows up in the super admin approval queue.
+        ensure_merchant_account(db, user)
+        db.commit()
+        db.refresh(user)
+
+    blocked = merchant_access_block_reason(user)
+    if blocked:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"errors": {"email": ["Your merchant account is suspended. Contact support."]}}
+            detail={"errors": {"email": [blocked]}}
         )
 
     # Issue token
@@ -210,6 +226,110 @@ def login(request: Request, body: LoginRequest, db: Session = Depends(get_db)):
         user=format_user_response(user),
         must_change_password=bool(user.must_change_password)
     )
+
+@router.post("/google")
+def google_login(request: Request, body: GoogleLoginRequest, db: Session = Depends(get_db)):
+    """Buyer sign-in with a Google ID token.
+
+    - Existing buyer with the token's (verified) email: logged in.
+    - Merchant/admin email: refused; those accounts use email + password.
+    - New email: responds `requires_registration` until the app resends the
+      token with `phone` and `terms_accepted` (every account needs a unique
+      phone number), then creates the buyer and logs them in.
+    """
+    if not google_auth.is_configured():
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured on this server (set GOOGLE_OAUTH_CLIENT_IDS).")
+    try:
+        claims = google_auth.verify_id_token(body.id_token)
+    except google_auth.GoogleTokenError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    email = claims["email"].lower()
+    ip = request.client.host if request.client else None
+    user = db.query(User).filter(User.email == email).first()
+
+    if user:
+        if user.deleted_at is not None or not user.is_active():
+            raise HTTPException(status_code=422, detail={"errors": {"email": ["This account has been deactivated. Contact support."]}})
+        if not user.is_customer:
+            raise HTTPException(status_code=422, detail={"errors": {"email": [
+                "Google sign-in is for shoppers. This email belongs to a merchant or staff account; log in with your email and password."
+            ]}})
+        user.last_login_at, user.last_login_ip = datetime.utcnow(), ip
+        db.add(AuditLog(user_id=user.id, action="auth.google_login", ip_address=ip, created_at=datetime.utcnow()))
+        db.commit()
+        db.refresh(user)
+        return {
+            "success": True,
+            "message": "Logged in with Google.",
+            "token": create_access_token(data={"sub": str(user.id), "role": user.role}),
+            "user": format_user_response(user).model_dump(),
+        }
+
+    profile = {"name": claims.get("name") or email.split("@")[0], "email": email, "picture": claims.get("picture")}
+    if not body.phone or not body.terms_accepted:
+        return {
+            "success": True,
+            "requires_registration": True,
+            "message": "Add your phone number and accept the terms to finish creating your account.",
+            "profile": profile,
+        }
+
+    if db.query(User.id).filter(User.phone == body.phone).first():
+        raise HTTPException(status_code=422, detail={"message": "The given data was invalid.", "errors": {"phone": ["An account with this phone number already exists."]}})
+
+    user = User(
+        name=profile["name"][:255],
+        email=email,
+        phone=body.phone,
+        # Google-only account: random password nobody knows, so password login stays closed.
+        password=get_password_hash(secrets.token_urlsafe(32)),
+        gender=body.gender,
+        role=UserRole.BUYER.value,
+        status="active",
+        email_verified_at=datetime.utcnow(),
+        last_login_at=datetime.utcnow(),
+        last_login_ip=ip,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=422, detail={"message": "The given data was invalid.", "errors": {"phone": ["An account with this phone number or email already exists."]}})
+    db.refresh(user)
+    db.add(AuditLog(user_id=user.id, action="auth.google_registered", ip_address=ip, created_at=datetime.utcnow()))
+    db.commit()
+    return JSONResponse(status_code=201, content={
+        "success": True,
+        "message": "Account created with Google.",
+        "token": create_access_token(data={"sub": str(user.id), "role": user.role}),
+        "user": format_user_response(user).model_dump(),
+    })
+
+
+FORGOT_PASSWORD_MESSAGE = "If an account exists for that email, we've sent a 6-digit reset code. It expires in {minutes} minutes."
+
+
+@router.post("/forgot-password")
+def forgot_password(request: Request, body: ForgotPasswordRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Email a reset code. The reply never reveals whether the email is registered,
+    and sending happens in the background so response time doesn't either."""
+    issued = password_reset.create_code(db, str(body.email), request.client.host if request.client else None)
+    if issued:
+        user, code = issued
+        background_tasks.add_task(password_reset.send_code_email, user.email, user.name, code)
+    return {"success": True, "message": FORGOT_PASSWORD_MESSAGE.format(minutes=settings.PASSWORD_RESET_CODE_TTL_MINUTES)}
+
+
+@router.post("/reset-password")
+def reset_password(request: Request, body: ResetPasswordRequest, db: Session = Depends(get_db)):
+    try:
+        password_reset.reset_password(db, str(body.email), body.code, body.password, request.client.host if request.client else None)
+    except password_reset.ResetError as e:
+        raise HTTPException(status_code=422, detail={"message": str(e), "errors": {e.field: [str(e)]}})
+    return {"success": True, "message": "Your password has been updated. You can now log in."}
+
 
 @router.get("/me", response_model=MeResponse)
 def me(current_user: User = Depends(get_current_user)):

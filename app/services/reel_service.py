@@ -68,6 +68,14 @@ def _signature(reel_id: int, expires: int) -> str:
     return hmac.new(settings.SECRET_KEY.encode(), f"reel-video:{reel_id}:{expires}".encode(), hashlib.sha256).hexdigest()
 
 
+def poster_url(reel: ProductTryOn) -> Optional[str]:
+    """Cover frame: the AI keyframe for generated reels, else the product's main image."""
+    if reel.thumb_path:
+        return f"/storage/{reel.thumb_path}"
+    image = reel.product.primary_image if reel.product else None
+    return f"/storage/{image.image_path}" if image else None
+
+
 def signed_video_url(reel: ProductTryOn, ttl_seconds: int = 3600) -> Optional[str]:
     """Short-lived URL a <video> tag can load without an Authorization header."""
     if not is_playable(reel):
@@ -80,6 +88,24 @@ def verify_signature(reel_id: int, exp: Optional[int], sig: Optional[str]) -> bo
     if not exp or not sig or exp < time.time():
         return False
     return hmac.compare_digest(_signature(reel_id, exp), sig)
+
+
+# Raw Drive files (the super admin's import library) get their own signature
+# namespace so a reel link can never be replayed as a Drive-file link or back.
+def _drive_signature(file_id: str, kind: str, expires: int) -> str:
+    return hmac.new(settings.SECRET_KEY.encode(), f"drive-file:{kind}:{file_id}:{expires}".encode(), hashlib.sha256).hexdigest()
+
+
+def signed_drive_url(file_id: str, kind: str, ttl_seconds: int = 3600) -> str:
+    """kind is "video" or "thumbnail"."""
+    expires = int(time.time()) + ttl_seconds
+    return f"/api/reels/drive/{file_id}/{kind}?exp={expires}&sig={_drive_signature(file_id, kind, expires)}"
+
+
+def verify_drive_signature(file_id: str, kind: str, exp: Optional[int], sig: Optional[str]) -> bool:
+    if not exp or not sig or exp < time.time():
+        return False
+    return hmac.compare_digest(_drive_signature(file_id, kind, exp), sig)
 
 
 # ------------------------------------------------------------ business rules

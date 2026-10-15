@@ -12,7 +12,7 @@ from app.core.database import get_db, SessionLocal
 from app.core.dependencies import get_current_user, require_merchant_can_trade
 from app.models.user import User
 from app.models.product import Product, ProductImage
-from app.models.ai_model import AiModel, ProductTryOn
+from app.models.ai_model import IMPORTED_FROM_DRIVE, AiModel, ProductTryOn
 from app.services import drive_storage, reel_service, video_provider
 from app.services.tryon_service import TryOnService
 
@@ -65,6 +65,8 @@ def format_try_on(to: ProductTryOn) -> dict:
             "generation_attempts": to.generation_attempts or 0,
             "video_provider": to.video_provider,
             "video_url": reel_service.signed_video_url(to),
+            "poster_url": reel_service.poster_url(to),
+            "source": "drive" if to.video_provider == IMPORTED_FROM_DRIVE else "ai",
             "storage_status": to.storage_status,
             "storage_provider": to.storage_provider,
             "storage_file_id": to.storage_file_id,
@@ -464,7 +466,8 @@ async def delete_try_on(
         raise HTTPException(status_code=409, detail="This reel is still being processed. Try again once it finishes.")
 
     video = reel_service.video_file(try_on)
-    drive_file_id = try_on.storage_file_id
+    # An imported reel only points at the super admin's original in Drive: never delete that.
+    drive_file_id = None if try_on.video_provider == IMPORTED_FROM_DRIVE else try_on.storage_file_id
     db.delete(try_on)
     db.commit()
 

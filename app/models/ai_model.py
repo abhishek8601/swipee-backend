@@ -35,12 +35,16 @@ class AiModel(Base):
     try_ons = relationship("ProductTryOn", back_populates="ai_model", cascade="all, delete-orphan")
 
 
+IMPORTED_FROM_DRIVE = "drive_import"
+
+
 class ProductTryOn(Base):
     __tablename__ = "product_try_ons"
 
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
-    ai_model_id = Column(Integer, ForeignKey("ai_models.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Empty for reels imported from Google Drive (no AI persona involved).
+    ai_model_id = Column(Integer, ForeignKey("ai_models.id", ondelete="CASCADE"), nullable=True, index=True)
     colour_attribute_value_id = Column(Integer, ForeignKey("attribute_values.id", ondelete="CASCADE"), nullable=True)
     merchant_id = Column(Integer, ForeignKey("merchants.id", ondelete="CASCADE"), nullable=False, index=True)
     source_image_id = Column(Integer, ForeignKey("product_images.id", ondelete="SET NULL"), nullable=True)
@@ -68,7 +72,7 @@ class ProductTryOn(Base):
     scene_style = Column(String(50), nullable=True)
     duration_seconds = Column(Integer, nullable=True)
     video_path = Column(String(255), nullable=True)  # relative to PRIVATE_STORAGE_DIR
-    video_provider = Column(String(50), nullable=True)
+    video_provider = Column(String(50), nullable=True)  # "replicate" for generated, IMPORTED_FROM_DRIVE for imports
     video_job_id = Column(String(255), nullable=True)
     generation_attempts = Column(Integer, default=0, nullable=False, server_default="0")
     lease_until = Column(DateTime, nullable=True)  # worker claim, prevents two workers on one reel
